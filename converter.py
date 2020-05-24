@@ -6,10 +6,13 @@ Created on Tue Apr  7 18:44:21 2020
 """
 from random import choice
 from bs4 import BeautifulSoup
-from geopy.geocoders import Nominatim
 import requests as req
 import numpy as np
 import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+import time
+import re
 
 
 DEKSTOP_AGENTS = ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.113 Safari/537.36',
@@ -57,35 +60,47 @@ def get_coordinate(address):
 
     except:
         return 0, 0
-
-
-def get_details(acc_id, address, lat, long):
-    # untuk mengambil detail alamat
-    if lat == 0 and long == 0:
-        coordinate_list = np.array([acc_id, address, None, None, 0, None])
-
-        transposed = np.transpose(coordinate_list)
-
-        print("Location Not Found")
-
-          return transposed
-
+    
+def get_address(driver, lat, long):
     try:
-        locator = Nominatim(user_agent=choice(USER_AGENTS))
-        location = locator.reverse([lat, long], timeout=10, language='ID')
+        driver.get('https://www.google.com/maps')
+        time.sleep(5)
+        driver.find_element_by_id('searchboxinput').send_keys(str(lat) + ' ' + str(long))
+        time.sleep(1)
+        driver.find_element_by_id('searchbox-searchbutton').click()
+        time.sleep(5)
+        address = driver.find_element_by_xpath('//*[@id="pane"]/div/div[1]/div/div/div[8]/div/div[1]/span[3]/span[3]').text
 
-        raw_address = location.raw
+        return address
 
-        if 'village' in raw_address['address']:
-            item_list = [acc_id, address, float(raw_address['lat']), float(raw_address['lon']), int(
-                raw_address['address']['postcode']), raw_address['address']['village']]
-        elif 'municipality' in raw_address['address']:
-            item_list = [acc_id, address, float(raw_address['lat']), float(raw_address['lon']), int(
-                raw_address['address']['postcode']), raw_address['address']['municipality']]
-        else:
-            item_list = [acc_id, address, float(raw_address['lat']), float(
-                raw_address['lon']), int(raw_address['address']['postcode']), None]
+    except:
+        return None
 
+
+def get_details(acc_id, address, lat, long, driver):
+    try:
+        # untuk mengambil detail alamat
+        if lat == 0 and long == 0:
+            coordinate_list = np.array([acc_id, address, None, None, None, None, None, None])
+    
+            transposed = np.transpose(coordinate_list)
+    
+            print("Location Not Found")
+    
+            return transposed
+        
+        address_map = get_address(driver, lat, long)
+        adress_split = address_map.split(',')
+        
+        municipality = adress_split[len(adress_split) - 4][1:]
+        region =  adress_split[len(adress_split) - 3][1:]
+        city = adress_split[len(adress_split) - 2][1:]
+        province = adress_split[len(adress_split) - 1][1:]
+        
+        if bool(re.search(r'\d', province)):
+            province = province[:province.rfind(' ')]
+    
+        item_list = [acc_id, address, lat, long, municipality, region, city, province]
         coordinate_list = np.array(item_list)
         transposed = np.transpose(coordinate_list)
 
@@ -94,7 +109,7 @@ def get_details(acc_id, address, lat, long):
         return transposed
 
     except:
-        coordinate_list = np.array([acc_id, address, lat, long, 0, None])
+        coordinate_list = np.array([acc_id, address, lat, long, None, None, None, None])
 
         transposed = np.transpose(coordinate_list)
 
@@ -105,61 +120,53 @@ def get_details(acc_id, address, lat, long):
 
 def collect_data():
     # membaca data, input file excel
-    data = pd.read_excel('xxx.xlsx')
+    data = pd.read_excel('EXCEL_FILE')
     id_list = data['AccountID']
-    street_list = data['GAB']
+    street_list = data['Street']
 
     return id_list, street_list
 
 
 def process_data(id_list, street_list):
-    # transformasi data dan cleaning data alamat
-    result = []
-    count = 1
-    for acc_id, address in zip(id_list, street_list):
-        print(count)
-        count += 1
-
-        lat, long = get_coordinate(address)
-
-        if 'RT' in address:
-            if 'KEL' in address:
-                str1 = address.split('RT')[0]
-                str2 = address.split('KEL')[1]
-                new_address = str1 + 'KEL' + str2
-            else:
-                str1 = address.split('RT')[0]
-                new_address = str1
-
-            lat, long = get_coordinate(new_address)
-        else:
+    driver = None
+    try:
+        options = Options()
+        options.add_argument("window-size=1400,600")
+        user_agent = random_headers()
+        options.add_argument(f'user-agent={user_agent}')
+        driver = webdriver.Chrome(executable_path='PATH_TO_WEBDRIVER', chrome_options=options)
+        
+        # transformasi data dan cleaning data alamat
+        result = []
+        count = 1
+        for acc_id, address in zip(id_list, street_list):
+            print(count)
+            count += 1
+    
             lat, long = get_coordinate(address)
-
-        res = get_details(acc_id, address, lat, long)
-        result.append(res)
-
-    return result
-
-
-def join_data(result):
-    # join data long lat dengan data kode pos untuk memperoleh detail alamat
-    df1 = pd.DataFrame(result)
-    df1.columns = ['AccountID', 'Alamat', 'Latitude',
-                   'Longitude', 'PostCode', 'Kelurahan']
-    df1['PostCode'] = df1['PostCode'].astype(int)
-
-    df2 = pd.read_excel('Data Kodepos Indonesia.xlsx')
-    df2 = df2.loc[:, ['PostCode', 'Kecamatan', 'Kabupaten', 'Propinsi']]
-    df2['PostCode'] = df2['PostCode'].astype(int)
-
-    join = pd.merge(left=df1, right=df2, how='left',
-                    on='PostCode').drop_duplicates('AccountID')
-    result_data = join[['AccountID', 'Alamat', 'Latitude',
-                        'Longitude', 'Kelurahan', 'Kecamatan', 'Kabupaten', 'Propinsi']]
-    result_data.columns = ['AccountID', 'Alamat', 'Latitude', 'Longitude',
-                           'Desa/Kelurahan', 'Kecamatan', 'Kota/Kabupaten', 'Provinsi']
-
-    return result_data
+    
+            if 'RT' in address:
+                if 'KEL' in address:
+                    str1 = address.split('RT')[0]
+                    str2 = address.split('KEL')[1]
+                    new_address = str1 + 'KEL' + str2
+                else:
+                    str1 = address.split('RT')[0]
+                    new_address = str1
+    
+                lat, long = get_coordinate(new_address)
+            else:
+                lat, long = get_coordinate(address)
+    
+            res = get_details(acc_id, address, lat, long, driver)
+            result.append(res)
+    
+        return result
+    
+    finally:
+            if driver is not None:
+                driver.close()
+                print('Process Complete')
 
 
 if __name__ == '__main__':
@@ -167,7 +174,7 @@ if __name__ == '__main__':
 
     result = process_data(id_list, street_list)
 
-    result_data = join_data(result)
-
-    result_data.to_excel('result.xlsx',
-                         float_format='%.7f', index=False)
+    df = pd.DataFrame(result)
+    df.columns = ['Account ID', 'Address', 'Latitude', 'Longitue', 'Desa/Kelurahan', 'Kecamatan', 'Kota/Kabupaten', 'Provinsi']
+    
+    df.to_excel('SAVE_PATH', float_format='%.7f', index=False)
